@@ -114,8 +114,8 @@ class AntigravityAuthController(
                 val now = System.currentTimeMillis()
 
                 if (available <= 0) {
-                    // Check for timeout if waiting in STARTING status
-                    if (mutableState.value.status == AntigravityAuthStatus.STARTING && now - startTime > 40_000L) {
+                    // Check for timeout if waiting in STARTING status (allow up to 120s for 200MB CLI cold start & network)
+                    if (mutableState.value.status == AntigravityAuthStatus.STARTING && now - startTime > 120_000L) {
                         error(str(R.string.rt_agy_sign_in_failed) + " (Timed out waiting for login link)")
                     }
                     delay(80)
@@ -148,6 +148,7 @@ class AntigravityAuthController(
                     ?: extractGoogleOAuthUrl(clean)
                     ?: extractGoogleOAuthUrl(fullRaw)
                 if (url != null && mutableState.value.authorizationUrl == null) {
+                    android.util.Log.i("AntigravityAuthController", "Detected Google OAuth URL: ${url.take(60)}...")
                     mutableState.value = AntigravityAuthState(
                         AntigravityAuthStatus.AWAITING_CODE,
                         authorizationUrl = url,
@@ -155,18 +156,27 @@ class AntigravityAuthController(
                     )
                 }
 
-                // Advance login menu reliably: re-send selection if still at login menu after 1.2s
+                // Advance login menu reliably: re-send selection if still at login menu after 1.2s,
+                // but do not spam while agy is actively contacting Google ("Signing in...")
+                val isSigningIn = clean.contains("Signing in", true) || clean.contains("Signing you in", true)
+                if (isSigningIn && mutableState.value.status == AntigravityAuthStatus.STARTING) {
+                    mutableState.value = mutableState.value.copy(
+                        message = str(R.string.rt_agy_oauth_selected),
+                    )
+                }
+
                 val isAtLoginMenu = (clean.contains("Select login method", true) ||
                     clean.contains("Google OAuth", true) ||
                     clean.contains("Other sign-in options", true)) &&
                     url == null &&
+                    !isSigningIn &&
                     !clean.contains("authorization code", true)
 
                 if (isAtLoginMenu && now - lastMenuAdvanceTime > 1200L) {
                     lastMenuAdvanceTime = now
                     menuAdvanceCount++
                     // In raw terminal mode, Enter is '\r' (0x0D).
-                    // Sending "\r\n" sends two Enter keystrokes, which prematurely submits an empty code.
+                    android.util.Log.i("AntigravityAuthController", "Advancing login menu (attempt $menuAdvanceCount)")
                     running.outputStream.write("\r".toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
                     if (mutableState.value.status == AntigravityAuthStatus.STARTING) {
