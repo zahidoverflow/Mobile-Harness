@@ -14,22 +14,26 @@ if [[ ! -f "$keystore_path" ]]; then
   exit 1
 fi
 
-upload_secret="${MH_UPLOAD_STORE_PASSWORD:-${MH_UPLOAD_KEY_PASSWORD:-}}"
-if [[ -z "$upload_secret" ]] && command -v security >/dev/null 2>&1; then
-  upload_secret="$(security find-generic-password -w -a "$keychain_account" -s "$keychain_service" 2>/dev/null || true)"
+upload_store_password="${MH_UPLOAD_STORE_PASSWORD:-}"
+upload_key_password="${MH_UPLOAD_KEY_PASSWORD:-}"
+if [[ -z "$upload_store_password" ]] && command -v security >/dev/null 2>&1; then
+  upload_store_password="$(security find-generic-password -w -a "$keychain_account" -s "$keychain_service" 2>/dev/null || true)"
+fi
+if [[ -z "$upload_key_password" ]]; then
+  upload_key_password="$upload_store_password"
 fi
 
-if [[ -z "$upload_secret" ]]; then
+if [[ -z "$upload_store_password" ]]; then
   echo "Upload secret not found: set MH_UPLOAD_STORE_PASSWORD or add to macOS keychain ($keychain_service)" >&2
   exit 1
 fi
-trap 'unset upload_secret' EXIT
+trap 'unset upload_store_password upload_key_password' EXIT
 
 cd "$project_dir"
 MH_UPLOAD_STORE_FILE="$keystore_path" \
-MH_UPLOAD_STORE_PASSWORD="$upload_secret" \
+MH_UPLOAD_STORE_PASSWORD="$upload_store_password" \
 MH_UPLOAD_KEY_ALIAS="$key_alias" \
-MH_UPLOAD_KEY_PASSWORD="$upload_secret" \
+MH_UPLOAD_KEY_PASSWORD="$upload_key_password" \
 ./gradlew \
   -PplayBuild=true \
   -PappVersionCode="$version_code" \

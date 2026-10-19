@@ -217,9 +217,13 @@ class AntigravityBridgeTest {
         assertTrue(isStaleConversationError("Error: conversation not found"))
         assertTrue(isStaleConversationError("invalid conversation: 12345"))
         assertTrue(isStaleConversationError("no conversation with id abc"))
+        assertTrue(isStaleConversationError("panic: conversation expired or missing"))
 
         val error = antigravityFriendlyError("Error: conversation not found")
         assertTrue(error.contains("previous Antigravity conversation was no longer available"))
+
+        val diagnosticError = antigravityFriendlyError("process terminated", "conversation not found in storage")
+        assertTrue(diagnosticError.contains("previous Antigravity conversation was no longer available"))
     }
 
     @Test

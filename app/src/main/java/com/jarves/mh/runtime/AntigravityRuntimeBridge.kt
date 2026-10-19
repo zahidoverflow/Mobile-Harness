@@ -474,10 +474,14 @@ class AntigravityRuntimeBridge(
             finishForegroundRuntime(true, projectSlug, AppStrings.get(context, R.string.rt_bridge_finished_in, "Antigravity", projectSlug))
         }.onFailure {
             val diagnostic = recentAntigravityDiagnostic(sessionStartedAtMillis)
+            val rawError = it.message.orEmpty()
+            if (isStaleConversationError(rawError) || isStaleConversationError(diagnostic.orEmpty())) {
+                saveConversationId(projectId, null)
+            }
             val message = if (userStopRequested) {
                 "Stopped by user"
             } else {
-                antigravityFriendlyError(it.message.orEmpty(), diagnostic)
+                antigravityFriendlyError(rawError, diagnostic)
             }
             emitFailure(sessionId, message)
             if (userStopRequested) cancelForegroundRuntime()

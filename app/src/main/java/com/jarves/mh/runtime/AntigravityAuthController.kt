@@ -180,7 +180,16 @@ class AntigravityAuthController(
                     }
                 }
 
-                if (isSignedInScreen(clean) || (codeSubmitted && hasOfficialCredential())) {
+                if (clean.contains("authentication failed", true) || clean.contains("failed to exchange", true)) {
+                    error(str(R.string.rt_agy_auth_failed))
+                }
+
+                val hasNewOfficialCredential = codeSubmitted &&
+                    officialCredentialFile().exists() &&
+                    officialCredentialFile().lastModified() >= startTime &&
+                    !clean.contains("authorization code", true)
+
+                if (isSignedInScreen(clean) || hasNewOfficialCredential) {
                     val email = extractSignedInEmail(clean)
                     onSignedInChanged(true, email)
                     mutableState.value = AntigravityAuthState(
@@ -236,9 +245,6 @@ class AntigravityAuthController(
                     running.outputStream.flush()
                     lastInteractionTime = now
                     workspaceTrustCompleted = true
-                }
-                if (clean.contains("authentication failed", true) || clean.contains("failed to exchange", true)) {
-                    error(str(R.string.rt_agy_auth_failed))
                 }
             }
             if (!codeSubmitted && mutableState.value.status == AntigravityAuthStatus.STARTING) {
