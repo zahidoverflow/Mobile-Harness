@@ -120,6 +120,21 @@ class AntigravityBridgeTest {
     }
 
     @Test
+    fun `oauth url with state not at end is extracted fully`() {
+        val output = """
+            Please visit the following URL to authenticate:
+            https://accounts.google.com/o/oauth2/auth?state=my-state&client_id=my-client.apps.googleusercontent.com&code_challenge=challenge&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob
+            ──────────────────────────────────────────────────
+        """.trimIndent()
+
+        val extracted = extractGoogleOAuthUrl(output)
+        assertEquals(
+            "https://accounts.google.com/o/oauth2/auth?state=my-state&client_id=my-client.apps.googleusercontent.com&code_challenge=challenge&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob",
+            extracted,
+        )
+    }
+
+    @Test
     fun `headless command uses exact model configuration without conflicting effort`() {
         val command = antigravityCommand("gemini-model", "high", "conversation-1")
         assertTrue(command.containsAll(listOf(

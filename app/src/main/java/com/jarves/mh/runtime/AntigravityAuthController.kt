@@ -57,7 +57,11 @@ class AntigravityAuthController(
     fun hasOfficialCredential(): Boolean = officialCredentialFile().let { it.isFile && it.length() > 0L }
 
     suspend fun beginLogin() = withContext(Dispatchers.IO) {
-        if (process?.isAlive == true) return@withContext
+        process?.takeIf { it.isAlive }?.let {
+            runCatching { it.destroy() }
+            process = null
+            delay(100)
+        }
         if (!installer.isAgentInstalled(com.jarves.mh.model.AgentKind.ANTIGRAVITY)) {
             mutableState.value = AntigravityAuthState(
                 AntigravityAuthStatus.ERROR,
@@ -94,16 +98,32 @@ class AntigravityAuthController(
         var offset = 0L
         val output = StringBuilder()
         var handshakeReplies = 0
-        var lastHandshakeReplyLength = 0
-        var loginMenuAdvanced = false
+        var lastHandshakeReplyTime = 0L
+        var lastMenuAdvanceTime = 0L
+        var menuAdvanceCount = 0
+        var lastInteractionTime = System.currentTimeMillis()
         var colorScreenCompleted = false
         var renderingScreenCompleted = false
         var privacyScreenCompleted = false
         var workspaceTrustCompleted = false
+        val startTime = System.currentTimeMillis()
+
+        // Send preemptive terminal capability response immediately so agy never blocks waiting
+        runCatching {
+            running.outputStream.write(TERMINAL_HANDSHAKE_REPLY.toByteArray(Charsets.UTF_8))
+            running.outputStream.flush()
+        }
+
         try {
             while (running.isAlive || native.outputFile.length() > offset) {
                 val available = native.outputFile.length() - offset
+                val now = System.currentTimeMillis()
+
                 if (available <= 0) {
+                    // Check for timeout if waiting in STARTING status
+                    if (mutableState.value.status == AntigravityAuthStatus.STARTING && now - startTime > 40_000L) {
+                        error(str(R.string.rt_agy_sign_in_failed) + " (Timed out waiting for login link)")
+                    }
                     delay(80)
                     continue
                 }
@@ -115,41 +135,22 @@ class AntigravityAuthController(
                 if (count <= 0) continue
                 offset += count
                 output.append(bytes.decodeToString(0, count))
-                val clean = sanitizeTerminalOutput(output.toString()).takeLast(40_000)
-                // Antigravity's renderer asks a real terminal for DEC mode and
-                // Kitty keyboard-protocol status before it paints its UI, and it
-                // may ask again on every new screen. NativeSpawn is pipe-backed,
-                // so answer the standard queries ourselves; `script` forwards
-                // this to agy's PTY unchanged.
-                if (handshakeReplies < 5 &&
-                    output.length - lastHandshakeReplyLength > 200 &&
-                    output.substring(lastHandshakeReplyLength).contains("\u001B[?u")
+                val fullRaw = output.toString()
+                val clean = sanitizeTerminalOutput(fullRaw).takeLast(40_000)
+
+                // Respond to terminal capability and cursor position queries without arbitrary length thresholds
+                if (handshakeReplies < 10 &&
+                    now - lastHandshakeReplyTime > 500L &&
+                    (fullRaw.contains("\u001B[?u") || fullRaw.contains("\u001B[c") || fullRaw.contains("\u001B[6n"))
                 ) {
                     running.outputStream.write(TERMINAL_HANDSHAKE_REPLY.toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
                     handshakeReplies++
-                    lastHandshakeReplyLength = output.length
+                    lastHandshakeReplyTime = now
                 }
-                if (!loginMenuAdvanced &&
-                    (clean.contains("Select login method", true) || clean.contains("Google OAuth", true)) &&
-                    extractGoogleOAuthUrl(clean) == null
-                ) {
-                    // agy's TUI (Ink) runs the PTY in raw mode. In raw mode
-                    // the kernel does not translate CR to LF, so we must send
-                    // the byte Ink treats as the Enter key (0x0A) explicitly.
-                    // A lone CR is mapped to the arrow-right key and only
-                    // re-paints the menu, while a real terminal transmits
-                    // CR LF on Enter, which Ink accepts even with raw input.
-                    running.outputStream.write("\r\n".toByteArray(Charsets.UTF_8))
-                    running.outputStream.flush()
-                    loginMenuAdvanced = true
-                    if (mutableState.value.status == AntigravityAuthStatus.STARTING) {
-                        mutableState.value = mutableState.value.copy(
-                            message = str(R.string.rt_agy_oauth_selected),
-                        )
-                    }
-                }
-                val url = extractGoogleOAuthUrl(clean)
+
+                // Check for OAuth URL continuously
+                val url = extractGoogleOAuthUrl(clean) ?: extractGoogleOAuthUrl(fullRaw)
                 if (url != null && mutableState.value.authorizationUrl == null) {
                     mutableState.value = AntigravityAuthState(
                         AntigravityAuthStatus.AWAITING_CODE,
@@ -157,6 +158,28 @@ class AntigravityAuthController(
                         message = str(R.string.rt_agy_finish_sign_in),
                     )
                 }
+
+                // Advance login menu reliably: re-send selection if still at login menu after 1.2s
+                val isAtLoginMenu = (clean.contains("Select login method", true) ||
+                    clean.contains("Google OAuth", true) ||
+                    clean.contains("Other sign-in options", true)) &&
+                    url == null &&
+                    !clean.contains("authorization code", true)
+
+                if (isAtLoginMenu && now - lastMenuAdvanceTime > 1200L) {
+                    lastMenuAdvanceTime = now
+                    menuAdvanceCount++
+                    // On first attempt send \r\n (Enter); on subsequent attempts alternate with "1\r\n"
+                    val keyToSend = if (menuAdvanceCount % 2 == 1) "\r\n" else "1\r\n"
+                    running.outputStream.write(keyToSend.toByteArray(Charsets.UTF_8))
+                    running.outputStream.flush()
+                    if (mutableState.value.status == AntigravityAuthStatus.STARTING) {
+                        mutableState.value = mutableState.value.copy(
+                            message = str(R.string.rt_agy_oauth_selected),
+                        )
+                    }
+                }
+
                 if (isSignedInScreen(clean) || (codeSubmitted && hasOfficialCredential())) {
                     val email = extractSignedInEmail(clean)
                     onSignedInChanged(true, email)
@@ -165,9 +188,7 @@ class AntigravityAuthController(
                         message = email?.let { str(R.string.rt_agy_connected_as, it) } ?: str(R.string.rt_agy_google_connected),
                         accountEmail = email,
                     )
-                    // Leave the official CLI cleanly so it has a chance to flush
-                    // its own credential/session state before PocketDev closes
-                    // the temporary terminal. PocketDev never reads that state.
+                    // Leave the official CLI cleanly so it flushes credential/session state
                     runCatching {
                         running.outputStream.write("/quit\r\n".toByteArray(Charsets.UTF_8))
                         running.outputStream.flush()
@@ -179,49 +200,41 @@ class AntigravityAuthController(
                     if (running.isAlive) running.destroy()
                     break
                 }
-                if (!colorScreenCompleted && clean.contains("Choose your color scheme", true)) {
-                    // Keep the official terminal color scheme selected by default.
-                    running.outputStream.write("\r\n".toByteArray())
+                if (!colorScreenCompleted && clean.contains("Choose your color scheme", true) && now - lastInteractionTime > 1000L) {
+                    running.outputStream.write("\r\n".toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
+                    lastInteractionTime = now
                     colorScreenCompleted = true
                 }
                 if (!renderingScreenCompleted &&
-                    clean.contains("no flickering (altscreen)", true) &&
-                    clean.contains("Native Terminal experience (inline)", true)
+                    (clean.contains("no flickering", true) || clean.contains("Native Terminal experience", true)) &&
+                    now - lastInteractionTime > 1000L
                 ) {
-                    // Select inline rendering, which is the appropriate mode for
-                    // PocketDev's captured PTY output.
-                    running.outputStream.write("\u001B[B\r\n".toByteArray())
+                    running.outputStream.write("\u001B[B\r\n".toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
+                    lastInteractionTime = now
                     renderingScreenCompleted = true
                 }
                 if (!privacyScreenCompleted &&
-                    clean.contains("Terms of Service & Data Use", true) &&
-                    clean.contains("help improve Antigravity CLI", true)
+                    (clean.contains("Terms of Service", true) || clean.contains("Data Use", true)) &&
+                    now - lastInteractionTime > 1000L
                 ) {
-                    // Optional interaction-data collection is selected by default.
-                    // PocketDev uses the privacy-preserving choice: Space clears
-                    // the checkbox, then two Tabs focus Done and Enter confirms.
-                    val optOutAndFinish = if (clean.contains("[x] Yes", true)) {
-                        " \t\t\r\n"
-                    } else {
-                        "\t\t\r\n"
-                    }
-                    running.outputStream.write(optOutAndFinish.toByteArray())
+                    val optOutAndFinish = if (clean.contains("[x] Yes", true)) " \t\t\r\n" else "\t\t\r\n"
+                    running.outputStream.write(optOutAndFinish.toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
+                    lastInteractionTime = now
                     privacyScreenCompleted = true
                     mutableState.value = mutableState.value.copy(
                         message = str(R.string.rt_agy_finishing_setup),
                     )
                 }
                 if (!workspaceTrustCompleted &&
-                    clean.contains("Do you trust the contents of this project", true) &&
-                    clean.contains("Yes, I trust this folder", true)
+                    (clean.contains("trust", true) && (clean.contains("folder", true) || clean.contains("project", true))) &&
+                    now - lastInteractionTime > 1000L
                 ) {
-                    // The authentication workspace is created and owned privately
-                    // by PocketDev and contains no user project files.
-                    running.outputStream.write("\r\n".toByteArray())
+                    running.outputStream.write("\r\n".toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
+                    lastInteractionTime = now
                     workspaceTrustCompleted = true
                 }
                 if (clean.contains("authentication failed", true) || clean.contains("failed to exchange", true)) {
@@ -312,28 +325,46 @@ class AntigravityAuthController(
 
 internal fun extractGoogleOAuthUrl(output: String): String? {
     val compact = output.replace(Regex("[\\r\\n\\t ]+"), "")
-    // agy's Ink renderer wraps the URL across terminal rows. Removing that
-    // whitespace reconstructs it, but the next rendered labels may then become
-    // adjacent to the URL. The PKCE `state` value is the final parameter emitted
-    // by agy, so terminate at its base64url-safe value instead of consuming TUI
-    // copy such as "Copy and paste the URL".
+
+    // 1. Primary match: Google OAuth authorization URL up to terminal formatting / box chars
+    val oauthPattern = Regex("https://accounts\\.google\\.com/o/oauth2/[^\\s\"'<>│─→]+")
+    val match = oauthPattern.find(compact)
+    if (match != null) {
+        val candidate = match.value.trimEnd { char -> char !in URL_CHARACTERS }
+        if (candidate.contains("client_id=", ignoreCase = true) ||
+            candidate.contains("auth", ignoreCase = true) ||
+            candidate.contains("code_challenge=", ignoreCase = true)
+        ) {
+            return candidate
+        }
+    }
+
+    // 2. PKCE match targeting state parameter
     GOOGLE_OAUTH_URL.find(compact)?.value
         ?.takeIf { "client_id=" in it && "code_challenge=" in it }
         ?.let { return it }
-    // Fallback for post-menu screens that print the browser URL in a different
-    // shape (wrapped lines, shortened query display). Only apply once the login
-    // menu has left the screen so help text cannot produce a false positive.
-    if (!output.contains("Select login method", true) &&
-        (output.contains("browser", true) || output.contains("visit", true) ||
-            output.contains("open", true) || output.contains("code", true) ||
-            output.contains("paste", true))
+
+    // 3. Fallback for any Google Accounts URL with auth or code
+    val candidates = Regex("https://accounts\\.google\\.com/[^\\s\"'<>│─→]{20,}")
+        .findAll(compact)
+        .map { it.value.trimEnd { char -> char !in URL_CHARACTERS } }
+        .filter { it.contains("oauth", ignoreCase = true) || it.contains("auth", ignoreCase = true) }
+        .toList()
+    if (candidates.isNotEmpty()) {
+        return candidates.first()
+    }
+
+    // 4. Fallback for post-menu screens or generic browser prompts
+    if (output.contains("browser", true) || output.contains("visit", true) ||
+        output.contains("open", true) || output.contains("code", true) ||
+        output.contains("paste", true) || output.contains("authenticate", true)
     ) {
-        val candidates = Regex("https://[^\\s\"']{20,}")
+        val generic = Regex("https://[^\\s\"'<>│─→]{20,}")
             .findAll(compact)
             .map { it.value.trimEnd { char -> char !in URL_CHARACTERS } }
-            .filter { it.length >= 30 && "." in it }
-            .toList()
-        return candidates.firstOrNull { "google" in it } ?: candidates.firstOrNull()
+            .filter { it.length >= 30 && "." in it && "google" in it }
+            .firstOrNull()
+        if (generic != null) return generic
     }
     return null
 }
@@ -360,7 +391,7 @@ private val GOOGLE_OAUTH_URL = Regex(
     "https://accounts\\.google\\.com/[^\\s\\\"'<>]*?[?&]state=[A-Za-z0-9._~-]+",
 )
 
-private const val TERMINAL_HANDSHAKE_REPLY = "\u001B[?2026;1\$y\u001B[?2027;1\$y\u001B[?1u\n"
+private const val TERMINAL_HANDSHAKE_REPLY = "\u001B[?2026;1\$y\u001B[?2027;1\$y\u001B[?1u"
 
 private val AUTH_ANSI = Regex("\\u001B(?:\\][^\\u0007]*(?:\\u0007|\\u001B\\\\)|\\[[0-?]*[ -/]*[@-~]|[()][A-Z0-9])")
 private fun sanitizeTerminalOutput(text: String): String = text
