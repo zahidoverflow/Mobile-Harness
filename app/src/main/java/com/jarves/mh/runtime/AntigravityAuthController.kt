@@ -38,6 +38,15 @@ class AntigravityAuthController(
         // Remove output left by an app/process crash before starting a new OAuth flow.
         authOutput.delete()
         logoutOutput.delete()
+        if (hasOfficialCredential() && !initiallySignedIn) {
+            mutableState.value = AntigravityAuthState(
+                status = AntigravityAuthStatus.SIGNED_IN,
+                message = initialAccountEmail.takeIf(String::isNotBlank)?.let { AppStrings.get(context, R.string.rt_agy_connected_as, it) }
+                    ?: AppStrings.get(context, R.string.rt_agy_google_connected),
+                accountEmail = initialAccountEmail.takeIf(String::isNotBlank),
+            )
+            onSignedInChanged(true, initialAccountEmail.takeIf(String::isNotBlank))
+        }
     }
 
     private fun officialCredentialFile() = File(
@@ -45,7 +54,7 @@ class AntigravityAuthController(
         "runtime/ubuntu/root/.gemini/antigravity-cli/antigravity-oauth-token",
     )
 
-    fun hasOfficialCredential(): Boolean = officialCredentialFile().isFile
+    fun hasOfficialCredential(): Boolean = officialCredentialFile().let { it.isFile && it.length() > 0L }
 
     suspend fun beginLogin() = withContext(Dispatchers.IO) {
         if (process?.isAlive == true) return@withContext
@@ -116,15 +125,13 @@ class AntigravityAuthController(
                     output.length - lastHandshakeReplyLength > 200 &&
                     output.substring(lastHandshakeReplyLength).contains("\u001B[?u")
                 ) {
-                    running.outputStream.write(TERMINAL_HANDSHAKE_REPLY.toByteArray())
+                    running.outputStream.write(TERMINAL_HANDSHAKE_REPLY.toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
                     handshakeReplies++
                     lastHandshakeReplyLength = output.length
                 }
-                if (handshakeReplies > 0 &&
-                    !loginMenuAdvanced &&
-                    clean.contains("Select login method", true) &&
-                    clean.contains("> 1. Google OAuth", true) &&
+                if (!loginMenuAdvanced &&
+                    (clean.contains("Select login method", true) || clean.contains("Google OAuth", true)) &&
                     extractGoogleOAuthUrl(clean) == null
                 ) {
                     // agy's TUI (Ink) runs the PTY in raw mode. In raw mode
@@ -133,7 +140,7 @@ class AntigravityAuthController(
                     // A lone CR is mapped to the arrow-right key and only
                     // re-paints the menu, while a real terminal transmits
                     // CR LF on Enter, which Ink accepts even with raw input.
-                    running.outputStream.write("\r\n".toByteArray())
+                    running.outputStream.write("\r\n".toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
                     loginMenuAdvanced = true
                     if (mutableState.value.status == AntigravityAuthStatus.STARTING) {
@@ -150,7 +157,7 @@ class AntigravityAuthController(
                         message = str(R.string.rt_agy_finish_sign_in),
                     )
                 }
-                if (isSignedInScreen(clean)) {
+                if (isSignedInScreen(clean) || (codeSubmitted && hasOfficialCredential())) {
                     val email = extractSignedInEmail(clean)
                     onSignedInChanged(true, email)
                     mutableState.value = AntigravityAuthState(
@@ -162,7 +169,7 @@ class AntigravityAuthController(
                     // its own credential/session state before PocketDev closes
                     // the temporary terminal. PocketDev never reads that state.
                     runCatching {
-                        running.outputStream.write("/quit\r\n".toByteArray())
+                        running.outputStream.write("/quit\r\n".toByteArray(Charsets.UTF_8))
                         running.outputStream.flush()
                     }
                     repeat(20) {
@@ -248,7 +255,7 @@ class AntigravityAuthController(
         check(running.isAlive) { str(R.string.rt_agy_session_expired) }
         // agy's interactive editor runs the PTY in raw mode and treats CR+LF as
         // the Enter key. LF alone inserts/repaints a line without submitting it.
-        running.outputStream.write((value + "\r\n").toByteArray())
+        running.outputStream.write((value + "\r\n").toByteArray(Charsets.UTF_8))
         running.outputStream.flush()
         codeSubmitted = true
         mutableState.value = mutableState.value.copy(
@@ -333,7 +340,12 @@ internal fun extractGoogleOAuthUrl(output: String): String? {
 
 private fun isSignedInScreen(output: String): Boolean =
     output.contains("for shortcuts", true) ||
-        (output.contains("Antigravity CLI", true) && output.contains("Google AI", true))
+        (output.contains("Antigravity CLI", true) && output.contains("Google AI", true)) ||
+        output.contains("logged in as", true) ||
+        output.contains("signed in as", true) ||
+        output.contains("authenticated as", true) ||
+        output.contains("welcome to antigravity", true) ||
+        output.contains("authentication successful", true)
 
 private fun extractSignedInEmail(output: String): String? =
     Regex("[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE)

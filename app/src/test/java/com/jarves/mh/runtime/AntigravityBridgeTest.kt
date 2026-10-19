@@ -196,4 +196,30 @@ class AntigravityBridgeTest {
         assertTrue("Do not create project output" in prompt)
         assertTrue(prompt.endsWith("Create hello.py"))
     }
+
+    @Test
+    fun `stale conversation error is detected and yields user friendly message`() {
+        assertTrue(isStaleConversationError("Error: conversation not found"))
+        assertTrue(isStaleConversationError("invalid conversation: 12345"))
+        assertTrue(isStaleConversationError("no conversation with id abc"))
+
+        val error = antigravityFriendlyError("Error: conversation not found")
+        assertTrue(error.contains("previous Antigravity conversation was no longer available"))
+    }
+
+    @Test
+    fun `various auth failures yield Google sign in message`() {
+        val messages = listOf(
+            "invalid_grant: token has been revoked",
+            "token expired, please re-authenticate",
+            "please run agy auth to continue",
+            "unauthorized: credentials invalid",
+        )
+        for (msg in messages) {
+            assertEquals(
+                "Antigravity needs Google sign-in. Open Settings → Coding agent.",
+                antigravityFriendlyError(msg),
+            )
+        }
+    }
 }
