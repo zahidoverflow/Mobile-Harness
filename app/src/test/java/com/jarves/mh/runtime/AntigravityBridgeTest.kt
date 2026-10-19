@@ -135,6 +135,21 @@ class AntigravityBridgeTest {
     }
 
     @Test
+    fun `extracts pristine OAuth URL from terminal OSC 8 hyperlinks`() {
+        val osc8Output = "\u001B[4m\u001B]8;id=jk12345;https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com&code_challenge=4gxOM2Wl5EerVMHd9btk-kRxuim5XMs2Pl3QyAWEFbg&code_challenge_method=S256&prompt=consent&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform&state=p670glbjYxe-Jq-NDZkDKg\u0007https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep\u001B]8;;\u0007"
+        val expected = "https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com&code_challenge=4gxOM2Wl5EerVMHd9btk-kRxuim5XMs2Pl3QyAWEFbg&code_challenge_method=S256&prompt=consent&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform&state=p670glbjYxe-Jq-NDZkDKg"
+
+        assertEquals(expected, extractOsc8GoogleOAuthUrl(osc8Output))
+        assertEquals(expected, extractGoogleOAuthUrl(osc8Output))
+    }
+
+    @Test
+    fun `ignores truncated OAuth candidate lacking redirect_uri or response_type`() {
+        val truncated = "https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep"
+        assertNull(extractGoogleOAuthUrl(truncated))
+    }
+
+    @Test
     fun `headless command uses exact model configuration without conflicting effort`() {
         val command = antigravityCommand("gemini-model", "high", "conversation-1")
         assertTrue(command.containsAll(listOf(

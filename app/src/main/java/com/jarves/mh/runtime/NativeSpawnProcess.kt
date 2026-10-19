@@ -85,9 +85,12 @@ internal class NativeSpawnProcess private constructor(
                                     if (count < 0) break
                                     destination.write(buffer, 0, count)
                                     destination.flush()
+                                    runCatching { destination.fd.sync() }
                                 }
                             }
                         }
+                    }.onFailure {
+                        android.util.Log.e("NativeSpawnProcess", "PTY output pump error", it)
                     }
                 }, "pocket-pty-output").apply {
                     isDaemon = true

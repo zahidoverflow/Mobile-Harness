@@ -108,12 +108,6 @@ class AntigravityAuthController(
         var workspaceTrustCompleted = false
         val startTime = System.currentTimeMillis()
 
-        // Send preemptive terminal capability response immediately so agy never blocks waiting
-        runCatching {
-            running.outputStream.write(TERMINAL_HANDSHAKE_REPLY.toByteArray(Charsets.UTF_8))
-            running.outputStream.flush()
-        }
-
         try {
             while (running.isAlive || native.outputFile.length() > offset) {
                 val available = native.outputFile.length() - offset
@@ -149,8 +143,10 @@ class AntigravityAuthController(
                     lastHandshakeReplyTime = now
                 }
 
-                // Check for OAuth URL continuously
-                val url = extractGoogleOAuthUrl(clean) ?: extractGoogleOAuthUrl(fullRaw)
+                // Check for OAuth URL continuously, checking raw OSC 8 hyperlink first
+                val url = extractOsc8GoogleOAuthUrl(fullRaw)
+                    ?: extractGoogleOAuthUrl(clean)
+                    ?: extractGoogleOAuthUrl(fullRaw)
                 if (url != null && mutableState.value.authorizationUrl == null) {
                     mutableState.value = AntigravityAuthState(
                         AntigravityAuthStatus.AWAITING_CODE,
@@ -169,9 +165,9 @@ class AntigravityAuthController(
                 if (isAtLoginMenu && now - lastMenuAdvanceTime > 1200L) {
                     lastMenuAdvanceTime = now
                     menuAdvanceCount++
-                    // On first attempt send \r\n (Enter); on subsequent attempts alternate with "1\r\n"
-                    val keyToSend = if (menuAdvanceCount % 2 == 1) "\r\n" else "1\r\n"
-                    running.outputStream.write(keyToSend.toByteArray(Charsets.UTF_8))
+                    // In raw terminal mode, Enter is '\r' (0x0D).
+                    // Sending "\r\n" sends two Enter keystrokes, which prematurely submits an empty code.
+                    running.outputStream.write("\r".toByteArray(Charsets.UTF_8))
                     running.outputStream.flush()
                     if (mutableState.value.status == AntigravityAuthStatus.STARTING) {
                         mutableState.value = mutableState.value.copy(
@@ -329,7 +325,19 @@ class AntigravityAuthController(
     }
 }
 
+internal fun extractOsc8GoogleOAuthUrl(output: String): String? {
+    val match = OSC8_OAUTH_URL.find(output) ?: return null
+    val candidate = match.groupValues[1].trimEnd { it !in URL_CHARACTERS }
+    return candidate.takeIf {
+        it.contains("client_id=", ignoreCase = true) &&
+            (it.contains("redirect_uri=", ignoreCase = true) || it.contains("response_type=", ignoreCase = true))
+    }
+}
+
 internal fun extractGoogleOAuthUrl(output: String): String? {
+    // Check OSC 8 escape sequence first if called directly with raw terminal output
+    extractOsc8GoogleOAuthUrl(output)?.let { return it }
+
     val compact = output.replace(Regex("[\\r\\n\\t ]+"), "")
 
     // 1. Primary match: Google OAuth authorization URL up to terminal formatting / box chars
@@ -337,9 +345,10 @@ internal fun extractGoogleOAuthUrl(output: String): String? {
     val match = oauthPattern.find(compact)
     if (match != null) {
         val candidate = match.value.trimEnd { char -> char !in URL_CHARACTERS }
-        if (candidate.contains("client_id=", ignoreCase = true) ||
-            candidate.contains("auth", ignoreCase = true) ||
-            candidate.contains("code_challenge=", ignoreCase = true)
+        if (candidate.contains("client_id=", ignoreCase = true) &&
+            (candidate.contains("redirect_uri=", ignoreCase = true) ||
+                candidate.contains("response_type=", ignoreCase = true) ||
+                candidate.contains("code_challenge=", ignoreCase = true))
         ) {
             return candidate
         }
@@ -347,14 +356,18 @@ internal fun extractGoogleOAuthUrl(output: String): String? {
 
     // 2. PKCE match targeting state parameter
     GOOGLE_OAUTH_URL.find(compact)?.value
-        ?.takeIf { "client_id=" in it && "code_challenge=" in it }
+        ?.takeIf { "client_id=" in it && ("code_challenge=" in it || "redirect_uri=" in it) }
         ?.let { return it }
 
     // 3. Fallback for any Google Accounts URL with auth or code
     val candidates = Regex("https://accounts\\.google\\.com/[^\\s\"'<>│─→]{20,}")
         .findAll(compact)
         .map { it.value.trimEnd { char -> char !in URL_CHARACTERS } }
-        .filter { it.contains("oauth", ignoreCase = true) || it.contains("auth", ignoreCase = true) }
+        .filter {
+            (it.contains("oauth", ignoreCase = true) || it.contains("auth", ignoreCase = true)) &&
+                it.contains("client_id=", ignoreCase = true) &&
+                (it.contains("redirect_uri=", ignoreCase = true) || it.contains("response_type=", ignoreCase = true))
+        }
         .toList()
     if (candidates.isNotEmpty()) {
         return candidates.first()
@@ -368,7 +381,7 @@ internal fun extractGoogleOAuthUrl(output: String): String? {
         val generic = Regex("https://[^\\s\"'<>│─→]{20,}")
             .findAll(compact)
             .map { it.value.trimEnd { char -> char !in URL_CHARACTERS } }
-            .filter { it.length >= 30 && "." in it && "google" in it }
+            .filter { it.length >= 30 && "." in it && "google" in it && "client_id=" in it }
             .firstOrNull()
         if (generic != null) return generic
     }
@@ -395,6 +408,10 @@ private val URL_CHARACTERS = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW
 
 private val GOOGLE_OAUTH_URL = Regex(
     "https://accounts\\.google\\.com/[^\\s\\\"'<>]*?[?&]state=[A-Za-z0-9._~-]+",
+)
+
+private val OSC8_OAUTH_URL = Regex(
+    """\u001B\]8;[^;]*;(https://accounts\.google\.com/o/oauth2/[^\u0007\u001B]+)(?:\u0007|\u001B\\)""",
 )
 
 private const val TERMINAL_HANDSHAKE_REPLY = "\u001B[?2026;1\$y\u001B[?2027;1\$y\u001B[?1u"
