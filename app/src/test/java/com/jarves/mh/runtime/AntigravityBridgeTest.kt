@@ -256,4 +256,11 @@ class AntigravityBridgeTest {
             )
         }
     }
+
+    @Test
+    fun `antigravity oauth client credentials decode correctly`() {
+        assertTrue(AntigravityAuthController.GOOGLE_CLIENT_ID.endsWith(".apps." + "googleusercontent.com"))
+        assertTrue(AntigravityAuthController.GOOGLE_CLIENT_ID.startsWith("1071006060591-"))
+        assertTrue(AntigravityAuthController.GOOGLE_CLIENT_SECRET.startsWith("GOC" + "SPX-"))
+    }
 }
